@@ -1,0 +1,3 @@
+data/r3d_models/finetuning/ucf101/r3d50_K_fc/save_200.pth
+data/ucf101/
+resnet3d/__init__.py
