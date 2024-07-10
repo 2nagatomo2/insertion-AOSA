@@ -134,6 +134,8 @@ class Base:
         spatial_offset = spatial_crop_size % 2
         temporal_h_csize = temporal_crop_size // 2
         temporal_offset = temporal_crop_size % 2
+        # spatial_h_csizeで縦幅，temporal_h_csizeで横幅を決定
+        # spatial_offset, temporal_offsetはキーポイントの間隔
 
         if self.consider_letter_box:
             self.has_letter_box = self._check_letter_box(video)
@@ -333,7 +335,7 @@ class Base:
             m = self._flow_norm_corr_stack_mask(m, fxfy)
         elif self.stack_method == "flow_vec_corr":
             # これが呼ばれる
-            m = self._my_flow_vec_corr_stack_mask(m, fxfy)
+            m = self._flow_vec_corr_stack_mask(m, fxfy)
         elif self.stack_method == "k_means":
             m = self._k_means_stack_mask(m, fxfy)
         else:
@@ -472,23 +474,6 @@ class Base:
             stacked_mask.append(torch.prod(_m, 0))
 
         return torch.stack(stacked_mask).cpu()
-    
-    def _my_flow_vec_corr_stack_mask(self, mask, fxfy):
-        flow_vec = fxfy.reshape(-1, fxfy.shape[2]).T
-        norm = np.linalg.norm(flow_vec, axis=1)
-        R = flow_vec @ flow_vec.T
-
-        mask = mask.to(self.device)
-        stacked_mask = []
-        for i in range(len(flow_vec)):
-            sims = deepcopy(R[i]) / (norm + 1e-10) / (norm[i] + 1e-10)
-            sims[i] = 0
-
-            idx_list = sims.argsort()[-self.N_stack_mask :]
-
-            _m = torch.cat([mask[[i]], mask[idx_list]])
-            stacked_mask.append(torch.prod(_m, 0))
-        return torch.stack(stacked_mask).cpu()
 
     def _flow_norm_corr_stack_mask(self, mask, fxfy):
         norm_vec = np.linalg.norm(fxfy, axis=1).T
@@ -614,6 +599,14 @@ class Base:
         return map.numpy()
 
     def _forward(self, x, requires_grad=False, target_class=None):
+        '''
+        params :
+            x : (マスク付き)画像の配列
+            target_class : そのままの意味
+        
+        return :
+            _probs.squeeze() : おそらく各クラスの確率
+        '''
         if x.dim() == 4:
             x = x.unsqueeze(0)
         # forward inputs
@@ -651,20 +644,30 @@ class Base:
             self.video_size,
             self.spatial_stride,
             self.temporal_stride,
-        )
+        ) # 何もない画像の上に，各キーポイントから長方形のマスクを1つ当てた画像の配列
+
         self.N = self.masks.shape[0]
 
-        inputs = self._gen_input(org_tensor)
+        inputs = self._gen_input(org_tensor) # 入力動画（画像配列）とマスク画像を組み合わせた画像の配列
+        # torch.Size([168, 3, 16, 112, 112])
         if self.save_inputs_path:
             self._save_unnorm_inputs(inputs)
 
         if get_feat:
             _probs = self._forward(inputs)
         else:
-            _probs = self._forward(inputs, target_class=target_class)
+            _probs = self._forward(inputs, target_class=target_class) # 各マスク付き画像において，分類結果がtarget_classである確率をもつ配列
 
         results = self._post_process(org_prob, _probs)
         return results
+    
+    def _apply_masks_to_video(self, org_tensor, org_probs, target_class, trans_video):
+        self.masks = self._gen_masks(trans_video, self.spatial_crop_size, self.temporal_crop_size, self.video_size, self.spatial_stride, self.temporal_stride)
+        self.N = self.masks.shape[0]
+
+        inputs = self._gen_input(org_tensor)
+
+        return inputs
     
 class OcclusionSensitivityMap3D(Base):
     def __init__(self, *args, **kargs):
@@ -683,4 +686,18 @@ class OcclusionSensitivityMap3D(Base):
             # trans_video = torch.stack(trans_video)
             org_feat = self._forward(org_video, target_class=target_class)
             results = self._run(org_tensor, org_feat, target_class, trans_video)
+        return results
+    
+    def apply_masks_to_video(self, org_video, target_class):
+        '''
+        maskと動画内のフレームを重ねるメソッドです．
+        '''
+        org_tensor = org_video.clone()
+        trans_video = []
+        for i in range(self.video_size[2]):
+            img = org_tensor.squeeze().transpose(0, 1)[i]
+            trans_video.append(self.unnormalize(img))
+        
+        org_feat = self._forward(org_video, target_class=target_class)
+        results = self._apply_masks_to_video(org_tensor, org_feat, target_class, trans_video)
         return results

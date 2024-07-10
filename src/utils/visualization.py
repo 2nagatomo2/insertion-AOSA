@@ -13,6 +13,8 @@ from PIL import Image
 def visualize(video_maps_list, video, w=0.5, title=None, save_path=None):
     fused_list = []
     heatmap_list = []
+    print(f'video maps list elements type: {type(video_maps_list[0])}')
+    print(f'video maps shape: {video_maps_list[0].shape}')
 
     for frame in range(video.shape[0]):
         fused = []
@@ -111,7 +113,7 @@ def show_maps_by_class(
     else:
         cls_id = target
     root = (
-        "/workspace/results/datasets/" + data_type + "/resnet50/" + model_type
+        "results/datasets/" + data_type + "/resnet50/" + model_type
     )
 
     img_root = os.path.join(root, "sdim1/org")
