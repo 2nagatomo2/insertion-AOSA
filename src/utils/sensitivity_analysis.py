@@ -299,6 +299,185 @@ class Base:
         if self.N_stack_mask != 1:
             m = self._stack_mask_method(m, fxfy)  # 0.27s
         return m
+    
+    def _gen_inverse_masks(
+        self, video, spatial_crop_size, temporal_crop_size, video_size, spatial_stride, temporal_stride
+    ):
+        m = []
+        fxfy = []
+        spatial_h_csize = spatial_crop_size // 2
+        spatial_offset = spatial_crop_size % 2
+        temporal_h_csize = temporal_crop_size // 2
+        temporal_offset = temporal_crop_size % 2
+        # spatial_h_csizeで縦幅，temporal_h_csizeで横幅を決定
+        # spatial_offset, temporal_offsetはキーポイントの間隔
+
+        if self.consider_letter_box:
+            self.has_letter_box = self._check_letter_box(video)
+        else:
+            self.has_letter_box = False
+
+        if self.gen_mask == "simple":
+            for k in range(0, video_size[2], temporal_stride):
+                for i in range(0, video_size[3], spatial_stride):
+                    for j in range(0, video_size[4], spatial_stride):
+                        _m = torch.ones(video_size)
+                        top = max(0, i - spatial_h_csize)
+                        bottom = min(video_size[3], i + spatial_h_csize + spatial_offset)
+
+                        left = max(0, j - spatial_h_csize)
+                        right = min(video_size[4], j + spatial_h_csize + spatial_offset)
+
+                        front = max(0, k - temporal_h_csize)
+                        back = min(video_size[2], k + temporal_h_csize + temporal_offset)
+                        _m[..., front:back, top:bottom, left:right] = 0
+                        m.append(_m)
+
+            m = torch.stack(m).unsqueeze(1)
+
+        elif self.gen_mask == "flow":
+            flow_list = self._calc_optical_flow(video)  # 0.72s
+
+            T = self.video_size[2]
+            H = self.video_size[3]
+            W = self.video_size[4]
+
+            temporal_step = np.arange(0, T, temporal_stride)
+            start_y, start_x = (
+                np.mgrid[spatial_stride / 2 : H : spatial_stride, spatial_stride / 2 : W : spatial_stride]
+                .reshape(2, -1)
+                .astype(int)
+            )
+            if self.has_letter_box:
+                start_x = start_x[(start_y >= 12) & (start_y <= 100)]
+                start_y = start_y[(start_y >= 12) & (start_y <= 100)]
+            m = []
+
+            use_start_tracking_points = np.full((len(temporal_step), len(start_y)), True)
+
+            self._init_flow_xyz(len(temporal_step), len(start_y), T)
+
+            for k, t_step in enumerate(temporal_step):
+                _fxfy = []
+                y, x = start_y, start_x
+                y = y[use_start_tracking_points[k]]
+                x = x[use_start_tracking_points[k]]
+                keep_tracking_points = np.full(len(y), True)
+                _m = torch.ones(tuple([len(y)]) + tuple(video_size))
+
+                # start = max(0, t_step - temporal_h_csize)
+                # end = min(T, t_step + temporal_h_csize + temporal_offset)
+                start = t_step
+                end = min(T, t_step + temporal_crop_size)
+                for t in range(0, end):
+                    if t < start:
+                        self._save_flow_xyz([0, 0, 0], k, grid_cnt, t)
+                        _fxfy.append(np.zeros_like(flow_list[0][y, x]))
+                    else:
+                        grid_cnt = 0
+                        for grid_cnt, (i, j) in enumerate(zip(y, x)):
+                            if keep_tracking_points[grid_cnt]:
+                                self._save_flow_xyz([j, i, t], k, grid_cnt, t)
+
+                                top = max(0, i - spatial_h_csize)
+                                bottom = min(video_size[3], i + spatial_h_csize + spatial_offset)
+
+                                left = max(0, j - spatial_h_csize)
+                                right = min(video_size[4], j + spatial_h_csize + spatial_offset)
+
+                                _m[grid_cnt, :, :, t, top:bottom, left:right] = 0
+                            else:
+                                self._save_flow_xyz([0, 0, 0], k, grid_cnt, t)
+
+                        if t < T - 1:
+                            pre_y = y
+                            pre_x = x
+                            fx, fy = flow_list[t][y, x].T
+                            y = np.int32(y + fy).clip(0, video_size[3] - 1)
+                            x = np.int32(x + fx).clip(0, video_size[4] - 1)
+                            _fxfy.append(np.array([fx, fy]).T)
+
+                        if self.delete_outside:
+                            keep_tracking_points = self._delete_outside_screen(
+                                pre_y, pre_x, fy, fx, keep_tracking_points
+                            )
+
+                        if self.delete_point and t in temporal_step[k + 1 :]:
+                            for grid_cnt, (i, j) in enumerate(zip(y, x)):
+                                hit_y = np.abs(start_y - i) <= spatial_h_csize
+                                hit_x = np.abs(start_x - j) <= spatial_h_csize
+                                hit_yx = hit_y & hit_x
+                                use_start_tracking_points[temporal_step == t, hit_yx] = False
+
+                m.append(_m)
+                _fxfy = np.array(_fxfy).transpose(1, 0, 2)
+                fxfy.append(_fxfy)
+
+            fxfy = np.concatenate(fxfy).transpose(1, 2, 0)
+            m = torch.cat(m).squeeze(1)
+
+        elif self.gen_mask == "flow_one":
+            # ここが呼ばれる
+            flow_list = self._calc_optical_flow(video)
+
+            T = self.video_size[2]
+            H = self.video_size[3]
+            W = self.video_size[4]
+            y, x = (
+                np.mgrid[spatial_stride / 2 : H : spatial_stride, spatial_stride / 2 : W : spatial_stride]
+                .reshape(2, -1)
+                .astype(int)
+            )
+            if self.has_letter_box:
+                x = x[(y >= 12) & (y <= 100)]
+                y = y[(y >= 12) & (y <= 100)]
+            m = torch.ones(tuple([len(y)]) + tuple(video_size))
+
+            self._init_flow_xyz(T, m.shape[0])
+
+            keep_tracking_points = np.full(len(y), True)
+
+            for t in range(0, T):
+                for grid_cnt, (i, j) in enumerate(zip(y, x)):
+                    if keep_tracking_points[grid_cnt]:
+                        self._save_flow_xyz([j, i, t], grid_cnt, t)
+
+                        top = max(0, i - spatial_h_csize)
+                        bottom = min(video_size[3], i + spatial_h_csize + spatial_offset)
+
+                        left = max(0, j - spatial_h_csize)
+                        right = min(video_size[4], j + spatial_h_csize + spatial_offset)
+
+                        m[grid_cnt, :, :, t, top:bottom, left:right] = 0
+
+                    else:
+                        self._save_flow_xyz([0, 0, 0], grid_cnt, t)
+
+                if t < T - 1:
+                    pre_y = y
+                    pre_x = x
+                    fx, fy = flow_list[t][y, x].T
+                    y = np.round(y + fy).astype(np.int16).clip(0, video_size[3] - 1)
+                    x = np.round(x + fx).astype(np.int16).clip(0, video_size[4] - 1)
+                    fxfy.append(np.array([fx, fy]))
+
+                    if self.delete_outside:
+                        keep_tracking_points = self._delete_outside_screen(
+                            pre_y, pre_x, fy, fx, keep_tracking_points
+                        )
+
+            m = m.squeeze(1)
+            fxfy = np.array(fxfy)
+
+        else:
+            assert False, "gen_mask"
+
+        if self.N_stack_mask != 1:
+            m = self._stack_mask_method(m, fxfy)  # 0.27s
+        
+        # mask の反転
+        m = 1 - m
+        return m
 
     def _init_flow_xyz(self, *args):
         # This method is for debug.
@@ -661,8 +840,16 @@ class Base:
         results = self._post_process(org_prob, _probs)
         return results
     
-    def _apply_masks_to_video(self, org_tensor, org_probs, target_class, trans_video):
+    def _apply_masks_to_video(self, org_tensor, trans_video):
         self.masks = self._gen_masks(trans_video, self.spatial_crop_size, self.temporal_crop_size, self.video_size, self.spatial_stride, self.temporal_stride)
+        self.N = self.masks.shape[0]
+
+        inputs = self._gen_input(org_tensor)
+
+        return inputs
+    
+    def _apply_inverse_masks_to_video(self, org_tensor, trans_video):
+        self.masks = self._gen_inverse_masks(trans_video, self.spatial_crop_size, self.temporal_crop_size, self.video_size, self.spatial_stride, self.temporal_stride)
         self.N = self.masks.shape[0]
 
         inputs = self._gen_input(org_tensor)
@@ -699,5 +886,19 @@ class OcclusionSensitivityMap3D(Base):
             trans_video.append(self.unnormalize(img))
         
         org_feat = self._forward(org_video, target_class=target_class)
-        results = self._apply_masks_to_video(org_tensor, org_feat, target_class, trans_video)
+        results = self._apply_masks_to_video(org_tensor,trans_video)
+        return results
+        
+    def apply_inverse_masks_to_video(self, org_video, target_class):
+        '''
+        maskと見えている部分の位置関係を逆転させるメソッドです．
+        '''
+        org_tensor = org_video.clone()
+        trans_video = []
+        for i in range(self.video_size[2]):
+            img = org_tensor.squeeze().transpose(0, 1)[i]
+            trans_video.append(self.unnormalize(img))
+        
+        org_feat = self._forward(org_video, target_class=target_class)
+        results = self._apply_inverse_masks_to_video(org_tensor, trans_video)
         return results
