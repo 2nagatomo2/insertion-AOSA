@@ -228,6 +228,46 @@ def load_jpg_ucf101(l, g, c, n, inference_class_names, transform):
 
     return torch.stack(video)
 
+def load_jpg_mydata(number, l, n, inference_class_names, transform):
+    name = inference_class_names[l]
+    dir = os.path.join(
+        "/home/kazuoki/iaosa/right-handed_images/" + name + "/{}".format(number)
+    )
+    path = sorted(glob.glob(dir + "/*"), key=numericalSort)
+
+    target_path = path[n * 16 : (n + 1) * 16]
+    if len(target_path) < 16:
+        print("not exist")
+        print(target_path)
+        print(len(target_path))
+        return False
+
+    video = []
+    for _p in target_path:
+        video.append(transform(Image.open(_p)))
+
+    return torch.stack(video)
+
+def load_jpg_ucf101_from_NAS(l, g, c, n, inference_class_names, transform):
+    name = inference_class_names[l]
+    dir = os.path.join(
+        "/mnt/data/users/nagatomo/UCF101_images/" + name + "/v_{}_g{}_c{}".format(name, str(g).zfill(2), str(c).zfill(2))
+    )
+    path = sorted(glob.glob(dir + "/*"), key=numericalSort)
+
+    target_path = path[n * 16 : (n + 1) * 16]
+    if len(target_path) < 16:
+        print("not exist")
+        print(target_path)
+        print("/mnt/data/users/nagatomo/UCF101_images/" + name + "/v_{}_g{}_c{}".format(name, str(g).zfill(2), str(c).zfill(2)))
+        return False
+
+    video = []
+    for _p in target_path:
+        video.append(transform(Image.open(_p)))
+
+    return torch.stack(video)
+
 
 def load_jpg_kinetics700(l, v, n, inference_class_names, transform):
     name = inference_class_names[l]

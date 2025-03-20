@@ -10,11 +10,9 @@ import matplotlib.animation as animation
 from PIL import Image
 
 
-def visualize(video_maps_list, video, w=0.5, title=None, save_path=None):
+def visualize(label_name, video_maps_list, video, w=0.5, title=None, save_path=None):
     fused_list = []
     heatmap_list = []
-    print(f'video maps list elements type: {type(video_maps_list[0])}')
-    print(f'video maps shape: {video_maps_list[0].shape}')
 
     for frame in range(video.shape[0]):
         fused = []
@@ -52,6 +50,50 @@ def visualize(video_maps_list, video, w=0.5, title=None, save_path=None):
     #         [_v_frame, fused_list[frame]], 1).astype(np.uint8)
     #     heatmap_list[frame] = np.concatenate(
     #         [np.ones_like(_v_frame)*255, heatmap_list[frame]], 1).astype(np.uint8)
+
+    selected_frames = [1, 5, 9, 13]  # 2枚目, 6枚目, 10枚目, 14枚目のインデックス
+    num_frames = len(selected_frames)
+
+    fig, axes = plt.subplots(3, num_frames + 1, figsize=(num_frames * 2.5, 6))  # タイトル列を追加
+    plt.subplots_adjust(wspace=0.1)  # 画像間の余白を調整
+
+    # 一番左にタイトルを表示
+    if title:
+        axes[0, 0].text(0.5, 0.5, "Video", fontsize=12, ha="center", va="center")
+        axes[0, 0].axis("off")
+        axes[1, 0].text(0.5, 0.5, f"{label_name} Map\nmask=1", fontsize=12, ha="center", va="center")
+        axes[1, 0].axis("off")
+        axes[2, 0].text(0.5, 0.5, f"{label_name} Map\nmasks=8", fontsize=12, ha="center", va="center")
+        axes[2, 0].axis("off")
+    else:
+        for row in range(3):
+            axes[row, 0].axis("off")
+
+    for col, frame_idx in enumerate(selected_frames):
+        # 1行目: video のフレーム
+        if video.shape[1] == 3:  # (frames, channels, height, width)
+            axes[0, col + 1].imshow(video[frame_idx].transpose(1, 2, 0).astype(np.uint8))
+        elif video.shape[-1] == 3:  # (frames, height, width, channels)
+            axes[0, col + 1].imshow(video[frame_idx].astype(np.uint8))
+        else:
+            raise ValueError("Unexpected shape for video: {}".format(video.shape))
+        axes[0, col + 1].axis("off")
+
+        # 2行目: video_maps_list[0] のフレーム
+        if len(video_maps_list) > 0:
+            axes[1, col + 1].imshow(video_maps_list[0][frame_idx], cmap="jet")
+            axes[1, col + 1].axis("off")
+
+        # 3行目: video_maps_list[1] のフレーム
+        if len(video_maps_list) > 1:
+            axes[2, col + 1].imshow(video_maps_list[1][frame_idx], cmap="jet")
+            axes[2, col + 1].axis("off")
+
+    plt.tight_layout()
+
+    # 画像を保存
+    plt.savefig(f"results/saliencyMaps/{label_name}.png", dpi=300)
+    plt.show()
 
     fig, (ax1, ax2) = plt.subplots(2, 1, facecolor="white", figsize=(len(video_maps_list)*1.7,4))
     ax1.axis("off")

@@ -732,7 +732,8 @@ class Base:
         return torch.zeros(video_size, device=self.device)
 
     def _gen_input(self, org_tensor):
-        print(f'masks shape: {self.masks.shape}')
+        # masks shape: torch.Size([168, 3, 16, 112, 112]) key point が 168 個あるのでこのサイズ．
+        # org_tensor : torch.Size([3, 16, 112, 112])
         occ_videos = org_tensor * self.masks
         return occ_videos
 
@@ -754,15 +755,16 @@ class Base:
         X,
         org_val,
     ):
-        print(f'X shape: {X.shape}')
-        print(f'org_val shape: {org_val.shape}')
+        """
+        マスクなしとマスクありの動画のtarget_class の推論スコアを引数として与えて，
+        スコアがどれくらい下がったかで，各ピクセルにおける重要度を返す．
+        X : マスクあり動画の推論スコアの配列 (size = 168)
+        org_val :  マスクなし動画の推論スコア
+        """
         _X = (X - org_val).cpu()
-        _mask = self.masks
-        print(f'mask shape in normalize: {_mask.shape}')
-        print(f'video_size: {self.video_size}')
+        _mask = self.masks # mask shape in normalize: torch.Size([168, 3, 16, 112, 112])
         _map = _X @ (_mask.reshape(self.N, -1) / _mask.reshape(_mask.shape[0], -1).mean(1)[:, np.newaxis])
         map = _map.cpu().view(self.video_size[1:]).mean(0) / self.N
-        print(f'map shape: {map.shape}')
 
         if self._do_map_normalization:
             map = (map - map.min()) / (map - map.min()).max()
@@ -776,15 +778,44 @@ class Base:
                 map = normalize_heatmap(map, 0)
 
         return map.numpy()
+    
+    def _inverse_normalize(
+        self,
+        X,
+        org_val,
+    ):
+        """
+        マスクありの動画のtarget_class の推論スコアを引数として与えて，
+        スコアがどれくらい上がったか各ピクセルにおける重要度を返す．
+        X : マスクあり動画の推論スコアの配列 (size = 168)
+        org_val :  マスクなし動画の推論スコア
+        """
+        _X = X.cpu()
+        _mask = self.masks # mask shape in normalize: torch.Size([168, 3, 16, 112, 112])
+        _map = _X @ (_mask.reshape(self.N, -1) / _mask.reshape(_mask.shape[0], -1).mean(1)[:, np.newaxis])
+        map = _map.cpu().view(self.video_size[1:]).mean(0) / self.N
+
+        if self._do_map_normalization:
+            map = (map - map.min()) / (map - map.min()).max()
+            map = map * (_X.max() - _X.min())
+            map = map - _X.max()
+
+            if self.normalize_each_frame:
+                for i in range(len(map)):
+                    map[i] = normalize_heatmap(map[i], 0)
+            else:
+                map = normalize_heatmap(map, 0)
+        
+        return map.numpy()
 
     def _forward(self, x, requires_grad=False, target_class=None):
         '''
         params :
-            x : (マスク付き)画像の配列
+            x : (マスク付き or なし)画像の配列
             target_class : そのままの意味
         
         return :
-            _probs.squeeze() : おそらく各クラスの確率
+            _probs.squeeze() : target_classの推論スコア
         '''
         if x.dim() == 4:
             x = x.unsqueeze(0)
@@ -792,6 +823,10 @@ class Base:
         x.requires_grad = requires_grad
         bs = self.batchsize
         N = x.shape[0]
+        # マスクなしのとき: N = 1
+        # マスクありのとき: N = 168 (キーポイントの数) 
+        # self.net は model 今回は resNet3D
+        # このresNet3Dはフレーム数が少なくても推論できる
         _probs = [self.net(x[j : min([j + bs, N]), ...]) for j in range(0, N, bs)]
         _probs = torch.vstack(_probs)
         if self.use_softmax:
@@ -856,12 +891,49 @@ class Base:
 
         return inputs
     
+    def _inverse_run(
+        self,
+        org_tensor,
+        org_prob,
+        target_class,
+        trans_video,
+        get_feat=False,
+    ):
+        self.masks = self._gen_inverse_masks(
+            trans_video,
+            self.spatial_crop_size,
+            self.temporal_crop_size,
+            self.video_size,
+            self.spatial_stride,
+            self.temporal_stride,
+        ) # 1箇所だけmaskが外れている画像の配列
+
+        self.N = self.masks.shape[0]
+
+        inputs = self._gen_input(org_tensor) # 入力動画（画像配列）とマスク画像を組み合わせた画像の配列
+        # torch.Size([168, 3, 16, 112, 112])
+        if self.save_inputs_path:
+            self._save_unnorm_inputs(inputs)
+
+        if get_feat:
+            _probs = self._forward(inputs)
+        else:
+            _probs = self._forward(inputs, target_class=target_class) # 各マスク付き画像において，分類結果がtarget_classである確率をもつ配列
+            # print(_probs.shape)
+            # print(_probs) 確率が見たければこのコメントアウトを外せば良い．
+
+        results = self._inverse_post_process(org_prob, _probs)
+        return results
+    
 class OcclusionSensitivityMap3D(Base):
     def __init__(self, *args, **kargs):
         super().__init__(*args, **kargs)
 
     def _post_process(self, org_prob, _probs):
         return self._normalize(_probs, org_prob)
+    
+    def _inverse_post_process(self, org_prob, _probs):
+        return self._inverse_normalize(_probs, org_prob)
 
     def run(self, org_video, target_class):
         with torch.inference_mode():
@@ -901,4 +973,17 @@ class OcclusionSensitivityMap3D(Base):
         
         org_feat = self._forward(org_video, target_class=target_class)
         results = self._apply_inverse_masks_to_video(org_tensor, trans_video)
+        return results
+
+    def inverse_run(self, org_video, target_class):
+        with torch.inference_mode():
+            org_tensor = org_video.clone() # torch.Size([3, 16, 112, 112])
+            trans_video = []
+            for i in range(self.video_size[2]): # video_size.shape = video_size: torch.Size([1, 3, 16, 112, 112])
+                img = org_tensor.squeeze().transpose(0, 1)[i] # torch.Size(3, 112, 112)
+                trans_video.append(self.unnormalize(img)) # PIL 画像の配列
+            # trans_video = torch.stack(trans_video)
+            org_feat = self._forward(org_video, target_class=target_class)
+            # video の Tensor と target_class を与えて，target_classの推論スコアの返す関数． 0.9878  とか．推論が正しくできていると高いスコアが出る．
+            results = self._inverse_run(org_tensor, org_feat, target_class, trans_video)
         return results

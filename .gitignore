@@ -3,3 +3,9 @@ data/ucf101/
 resnet3d
 pyflow
 masks
+myaosa.html
+.gitignore
+src/utils/__pycache__
+evaluation
+right-handed_images/
+left-handed_images/
